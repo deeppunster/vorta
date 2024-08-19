@@ -9,7 +9,15 @@ import os.path as osp
 from functools import reduce
 from pathlib import PurePath
 from typing import Generic, List, Optional, Sequence, Tuple, TypeVar, Union, overload
-from PyQt5.QtCore import QAbstractItemModel, QModelIndex, QObject, QSortFilterProxyModel, Qt, pyqtSignal
+
+from PyQt6.QtCore import (
+    QAbstractItemModel,
+    QModelIndex,
+    QObject,
+    QSortFilterProxyModel,
+    Qt,
+    pyqtSignal,
+)
 
 #: A representation of a path
 Path = Tuple[str, ...]
@@ -162,15 +170,22 @@ class FileSystemItem(Generic[T]):
         """
         if isinstance(child_subpath_index, FileSystemItem):
             child = child_subpath_index
+            if not child.subpath:
+                raise ValueError("Child without subpath")
+
             i = bisect.bisect_left(self.children, child)
             if i < len(self.children) and self.children[i] == child:
                 del self.children[i]
+            else:
+                raise ValueError("Child not found")
 
         elif isinstance(child_subpath_index, str):
             subpath = child_subpath_index
             i = bisect.bisect_left(self.children, subpath)
             if i < len(self.children) and self.children[i].subpath == subpath:
                 del self.children[i]
+            else:
+                raise ValueError("Child not found")
 
         elif isinstance(child_subpath_index, int):
             i = child_subpath_index
@@ -239,7 +254,7 @@ class FileSystemItem(Generic[T]):
             i, item = res
             return item
 
-        fsi = reduce(walk, path, self)
+        fsi = reduce(walk, path, self)  # handles empty path -> returns self
         return fsi
 
     def __repr__(self):
@@ -316,14 +331,12 @@ class FileTreeModel(QAbstractItemModel, Generic[T]):
         #: simple list of items
         FLAT = enum.auto()
 
-    def __init__(self, parent=None):
+    def __init__(self, mode: 'FileTreeModel.DisplayMode' = DisplayMode.TREE, parent=None):
         """Init."""
         super().__init__(parent)
         self.root: FileSystemItem[T] = FileSystemItem([], None)
 
-        #: mode
-        self.mode: 'FileTreeModel.DisplayMode' = self.DisplayMode.TREE
-
+        self.mode = mode
         #: flat representation of the tree
         self._flattened: List[FileSystemItem] = []
 
@@ -351,13 +364,16 @@ class FileTreeModel(QAbstractItemModel, Generic[T]):
         item : FileSystemItemLike
             The item.
         """
-        self.beginResetModel()
-
         path = item[0]
         data = item[1]
 
         if isinstance(path, PurePath):
             path = path.parts
+
+        if not path:
+            return  # empty path (e.g. `.`) can't be added
+
+        self.beginResetModel()
 
         def child(tup, subpath):
             fsi, i = tup
@@ -594,7 +610,7 @@ class FileTreeModel(QAbstractItemModel, Generic[T]):
         if isinstance(path, PurePath):
             path = path.parts
 
-        return self.root.get_path(path)
+        return self.root.get_path(path)  # handles empty path
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         """
@@ -688,6 +704,9 @@ class FileTreeModel(QAbstractItemModel, Generic[T]):
         """
         if isinstance(path, PurePath):
             path = path.parts
+
+        if not path:
+            return QModelIndex()  # empty path won't ever be in the model
 
         # flat mode
         if self.mode == self.DisplayMode.FLAT:
@@ -826,7 +845,7 @@ class FileTreeModel(QAbstractItemModel, Generic[T]):
         row, item = parent_item._parent.get(parent_item.subpath)
         return self.createIndex(row, 0, parent_item)
 
-    def flags(self, index: QModelIndex) -> Qt.ItemFlags:
+    def flags(self, index: QModelIndex) -> Qt.ItemFlag:
         """
         Returns the item flags for the given index.
 
@@ -889,7 +908,15 @@ class FileTreeSortProxyModel(QSortFilterProxyModel):
         super().__init__(parent)
         self.folders_on_top = False
 
-    def keepFoldersOnTop(self, value: bool = None) -> bool:
+    @overload
+    def keepFoldersOnTop(self) -> bool:
+        ...
+
+    @overload
+    def keepFoldersOnTop(self, value: bool) -> bool:
+        ...
+
+    def keepFoldersOnTop(self, value=None) -> bool:
         """
         Set or get whether folders are kept on top when sorting.
 

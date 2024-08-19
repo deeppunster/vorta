@@ -1,5 +1,25 @@
 import sys
 
+try:
+    from Cocoa import NSURL, NSBundle
+    from CoreFoundation import kCFAllocatorDefault
+    from Foundation import NSDictionary
+    from LaunchServices import (
+        LSSharedFileListCopySnapshot,
+        LSSharedFileListCreate,
+        LSSharedFileListInsertItemURL,
+        LSSharedFileListItemRemove,
+        LSSharedFileListItemResolve,
+        kLSSharedFileListItemHidden,
+        kLSSharedFileListItemLast,
+        kLSSharedFileListNoUserInteraction,
+        kLSSharedFileListSessionLoginItems,
+    )
+
+    APP_PATH = NSBundle.mainBundle().bundlePath()
+except ImportError:
+    pass
+
 AUTOSTART_DELAY = """StartupNotify=false
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=20"""
@@ -11,32 +31,27 @@ def open_app_at_startup(enabled=True):
     while on Linux it adds a .desktop file at ~/.config/autostart
     """
     if sys.platform == 'darwin':
-        from Cocoa import NSURL, NSBundle
-        from CoreFoundation import kCFAllocatorDefault
-        from Foundation import NSDictionary
 
-        # CF = CDLL(find_library('CoreFoundation'))
-        from LaunchServices import (
-            LSSharedFileListCreate,
-            LSSharedFileListInsertItemURL,
-            LSSharedFileListItemRemove,
-            kLSSharedFileListItemHidden,
-            kLSSharedFileListItemLast,
-            kLSSharedFileListSessionLoginItems,
-        )
-
-        app_path = NSBundle.mainBundle().bundlePath()
-        url = NSURL.alloc().initFileURLWithPath_(app_path)
+        url = NSURL.alloc().initFileURLWithPath_(APP_PATH)
         login_items = LSSharedFileListCreate(kCFAllocatorDefault, kLSSharedFileListSessionLoginItems, None)
         props = NSDictionary.dictionaryWithObject_forKey_(True, kLSSharedFileListItemHidden)
 
-        new_item = LSSharedFileListInsertItemURL(login_items, kLSSharedFileListItemLast, None, None, url, props, None)
-        if not enabled:
-            LSSharedFileListItemRemove(login_items, new_item)
+        if enabled:
+            LSSharedFileListInsertItemURL(login_items, kLSSharedFileListItemLast, None, None, url, props, None)
+        else:
+            # From https://github.com/pudquick/pyLoginItems/blob/master/pyLoginItems.py
+            list_ref = LSSharedFileListCreate(None, kLSSharedFileListSessionLoginItems, None)
+            login_items, _ = LSSharedFileListCopySnapshot(list_ref, None)
+            flags = kLSSharedFileListNoUserInteraction + kLSSharedFileListNoUserInteraction
+            for i in login_items:
+                err, a_CFURL, a_FSRef = LSSharedFileListItemResolve(i, flags, None, None)
+                if 'Vorta.app' in str(a_CFURL):
+                    LSSharedFileListItemRemove(list_ref, i)
 
     elif sys.platform.startswith('linux'):
         from pathlib import Path
-        from appdirs import user_config_dir
+
+        from platformdirs import user_config_path
 
         is_flatpak = Path('/.flatpak-info').exists()
 
@@ -47,7 +62,7 @@ def open_app_at_startup(enabled=True):
         if is_flatpak:
             autostart_path = Path.home() / '.config' / 'autostart'
         else:
-            autostart_path = Path(user_config_dir("autostart"))
+            autostart_path = user_config_path("autostart")
 
         if not autostart_path.exists():
             autostart_path.mkdir(parents=True, exist_ok=True)

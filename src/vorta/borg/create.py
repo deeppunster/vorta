@@ -2,9 +2,17 @@ import os
 import subprocess
 import tempfile
 from datetime import datetime as dt
-from vorta.i18n import trans_late
-from vorta.store.models import ArchiveModel, RepoModel, SourceFileModel, WifiSettingModel
+
+from vorta import config
+from vorta.i18n import trans_late, translate
+from vorta.store.models import (
+    ArchiveModel,
+    RepoModel,
+    SourceFileModel,
+    WifiSettingModel,
+)
 from vorta.utils import borg_compat, format_archive_name, get_network_status_monitor
+
 from .borg_job import BorgJob
 
 
@@ -15,10 +23,12 @@ class BorgCreateJob(BorgJob):
                 snapshot_id=result['data']['archive']['id'],
                 defaults={
                     'name': result['data']['archive']['name'],
-                    'time': dt.fromisoformat(result['data']['archive']['start']),
+                    # SQLite can't save timezone, so we remove it here. TODO: Keep as UTC?
+                    'time': dt.fromisoformat(result['data']['archive']['start']).replace(tzinfo=None),
                     'repo': result['params']['repo_id'],
                     'duration': result['data']['archive']['duration'],
                     'size': result['data']['archive']['stats']['deduplicated_size'],
+                    'trigger': result['params'].get('category', 'user'),
                 },
             )
             new_archive.save()
@@ -26,22 +36,29 @@ class BorgCreateJob(BorgJob):
                 stats = result['data']['cache']['stats']
                 repo = RepoModel.get(id=result['params']['repo_id'])
                 repo.total_size = stats['total_size']
-                repo.unique_csize = stats['unique_csize']
+                # repo.unique_csize = stats['unique_csize']
                 repo.unique_size = stats['unique_size']
                 repo.total_unique_chunks = stats['total_unique_chunks']
                 repo.save()
 
             if result['returncode'] == 1:
-                self.app.backup_progress_event.emit(self.tr('Backup finished with warnings. See logs for details.'))
+                self.app.backup_progress_event.emit(
+                    f"[{self.params['profile_name']}] "
+                    + translate(
+                        'BorgCreateJob',
+                        'Backup finished with warnings. See the <a href="{0}">logs</a> for details.',
+                    ).format(config.LOG_DIR.as_uri())
+                )
             else:
-                self.app.backup_progress_event.emit(self.tr('Backup finished.'))
+                self.app.backup_log_event.emit('', {})
+                self.app.backup_progress_event.emit(f"[{self.params['profile_name']}] {self.tr('Backup finished.')}")
 
     def progress_event(self, fmt):
-        self.app.backup_progress_event.emit(fmt)
+        self.app.backup_progress_event.emit(f"[{self.params['profile_name']}] {fmt}")
 
     def started_event(self):
         self.app.backup_started_event.emit()
-        self.app.backup_progress_event.emit(self.tr('Backup started.'))
+        self.app.backup_progress_event.emit(f"[{self.params['profile_name']}] {self.tr('Backup started.')}")
 
     def finished_event(self, result):
         self.app.backup_finished_event.emit(result)
@@ -76,8 +93,19 @@ class BorgCreateJob(BorgJob):
         else:
             ret['ok'] = False  # Set back to False, so we can do our own checks here.
 
-        n_backup_folders = SourceFileModel.select().count()
-        if n_backup_folders == 0:
+        n_backup_folders = SourceFileModel.select().where(SourceFileModel.profile == profile).count()
+
+        # cmd options like `--paths-from-command` require a command
+        # that is appended to the arguments
+        # $ borg create --paths-from-command repo::archive1 -- find /home/user -type f -size -76M
+        extra_cmd_options = []
+        suffix_command = []
+        if profile.repo.create_backup_cmd:
+            s1, sep, s2 = profile.repo.create_backup_cmd.partition('-- ')
+            extra_cmd_options = s1.split()
+            suffix_command = (sep + s2).split()
+
+        if n_backup_folders == 0 and '--paths-from-command' not in extra_cmd_options:
             ret['message'] = trans_late('messages', 'Add some folders to back up first.')
             return ret
 
@@ -132,37 +160,52 @@ class BorgCreateJob(BorgJob):
             '-C',
             profile.compression,
         ]
+        cmd += extra_cmd_options
 
-        if profile.repo.create_backup_cmd:
-            cmd.extend(profile.repo.create_backup_cmd.split(' '))
+        # Function to extend command with exclude-if-present patterns
+        if profile.exclude_if_present is not None:
+            patterns = []
+            for f in profile.exclude_if_present.split('\n'):
+                f = f.strip()
+                if f.startswith('[x]'):
+                    patterns.append(f[3:].strip())  # Remove the '[x]' prefix
+
+            for pattern in patterns:
+                cmd.extend(['--exclude-if-present', pattern])
 
         # Add excludes
         # Partly inspired by borgmatic/borgmatic/borg/create.py
-        if profile.exclude_patterns is not None:
-            exclude_dirs = []
-            for p in profile.exclude_patterns.split('\n'):
-                if p.strip():
-                    expanded_directory = os.path.expanduser(p.strip())
-                    exclude_dirs.append(expanded_directory)
+        exclude_dirs = []
+        for p in profile.get_combined_exclusion_string().split('\n'):
+            if p.strip():
+                expanded_directory = os.path.expanduser(p.strip())
+                exclude_dirs.append(expanded_directory)
 
-            if exclude_dirs:
-                pattern_file = tempfile.NamedTemporaryFile('w', delete=True)
-                pattern_file.write('\n'.join(exclude_dirs))
-                pattern_file.flush()
-                cmd.extend(['--exclude-from', pattern_file.name])
-                ret['cleanup_files'].append(pattern_file)
+        if exclude_dirs:
+            pattern_file = tempfile.NamedTemporaryFile('w', delete=True)
+            pattern_file.write('\n'.join(exclude_dirs))
+            pattern_file.flush()
+            cmd.extend(['--exclude-from', pattern_file.name])
+            ret['cleanup_files'].append(pattern_file)
 
-        if profile.exclude_if_present is not None:
-            for f in profile.exclude_if_present.split('\n'):
-                if f.strip():
-                    cmd.extend(['--exclude-if-present', f.strip()])
+        # Currently not in use, but may be added back to the UI later.
+        # if profile.exclude_if_present is not None:
+        #     for f in profile.exclude_if_present.split('\n'):
+        #         if f.strip():
+        #             cmd.extend(['--exclude-if-present', f.strip()])
 
         # Add repo url and source dirs.
         new_archive_name = format_archive_name(profile, profile.new_archive_name)
-        cmd.append(f"{profile.repo.url}::{new_archive_name}")
+
+        if borg_compat.check('V2'):
+            cmd += ["-r", profile.repo.url, new_archive_name]
+        else:
+            cmd.append(f"{profile.repo.url}::{new_archive_name}")
 
         for f in SourceFileModel.select().where(SourceFileModel.profile == profile.id):
             cmd.append(f.dir)
+
+        cmd += suffix_command
 
         ret['message'] = trans_late('messages', 'Starting backup…')
         ret['ok'] = True

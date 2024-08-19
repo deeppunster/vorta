@@ -3,21 +3,25 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: 'Branch to use for building macOS release'
+        description: 'Branch to use for building release'
         required: true
         default: 'master'
       borg_version:
         description: 'Borg version to package'
         required: true
-        default: '1.2.1'
+        default: '1.2.8'
+      macos_version:
+        description: 'macOS version for building'
+        required: true
+        default: 'macos-11'
 
 jobs:
   build:
-    runs-on: macos-10.15
+    runs-on: ${{ github.event.inputs.macos_version }}
 
     steps:
     - name: Check out selected branch
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
       with:
         ref: ${{ github.event.inputs.branch }}
     - name: Install system dependencies
@@ -50,6 +54,7 @@ jobs:
         CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
         APPLE_ID_USER: ${{ secrets.APPLE_ID_USER }}
         APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       run: |
         echo $MACOS_CERTIFICATE | base64 --decode > certificate.p12
         security create-keychain -p 123 build.keychain

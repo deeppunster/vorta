@@ -5,12 +5,18 @@ At the bottom there is a simple schema migration system.
 """
 
 import json
+import logging
 from datetime import datetime
+from enum import Enum
+
 import peewee as pw
 from playhouse import signals
+
 from vorta.utils import slugify
+from vorta.views.utils import get_exclusion_presets
 
 DB = pw.Proxy()
+logger = logging.getLogger(__name__)
 
 
 class JSONField(pw.TextField):
@@ -37,6 +43,7 @@ class RepoModel(BaseModel):
     """A single remote repo with unique URL."""
 
     url = pw.CharField(unique=True)
+    name = pw.CharField(default='')
     added_at = pw.DateTimeField(default=datetime.now)
     encryption = pw.CharField(null=True)
     unique_size = pw.IntegerField(null=True)
@@ -72,7 +79,7 @@ class BackupProfileModel(BaseModel):
     ssh_key = pw.CharField(default=None, null=True)
     compression = pw.CharField(default='lz4')
     exclude_patterns = pw.TextField(null=True)
-    exclude_if_present = pw.TextField(null=True)
+    exclude_if_present = pw.TextField(null=True, default="[] .nobackup\n[] CACHEDIR.TAG")
     schedule_mode = pw.CharField(default='off')
     schedule_interval_count = pw.IntegerField(default=3)
     schedule_interval_unit = pw.CharField(default='hours')
@@ -83,6 +90,8 @@ class BackupProfileModel(BaseModel):
     schedule_make_up_missed = pw.BooleanField(default=True)
     validation_on = pw.BooleanField(default=True)
     validation_weeks = pw.IntegerField(default=3)
+    compaction_on = pw.BooleanField(default=False)
+    compaction_weeks = pw.IntegerField(default=3)
     prune_on = pw.BooleanField(default=False)
     prune_hour = pw.IntegerField(default=2)
     prune_day = pw.IntegerField(default=7)
@@ -101,6 +110,69 @@ class BackupProfileModel(BaseModel):
 
     def slug(self):
         return slugify(self.name)
+
+    def get_combined_exclusion_string(self):
+        allPresets = get_exclusion_presets()
+        excludes = ""
+
+        if (
+            ExclusionModel.select()
+            .where(
+                ExclusionModel.profile == self,
+                ExclusionModel.enabled,
+                ExclusionModel.source == ExclusionModel.SourceFieldOptions.CUSTOM.value,
+            )
+            .count()
+            > 0
+        ):
+            excludes = "# custom added rules\n"
+
+        for exclude in ExclusionModel.select().where(
+            ExclusionModel.profile == self,
+            ExclusionModel.enabled,
+            ExclusionModel.source == ExclusionModel.SourceFieldOptions.CUSTOM.value,
+        ):
+            excludes += f"{exclude.name}\n"
+
+        raw_excludes = self.exclude_patterns
+        if raw_excludes:
+            excludes += "\n# raw exclusions\n"
+            excludes += raw_excludes
+            excludes += "\n"
+
+        # go through all source=='preset' exclusions, find the name in the allPresets dict, and add the patterns
+        for exclude in ExclusionModel.select().where(
+            ExclusionModel.profile == self,
+            ExclusionModel.enabled,
+            ExclusionModel.source == ExclusionModel.SourceFieldOptions.PRESET.value,
+        ):
+            if exclude.name not in allPresets:
+                logger.warning("Exclusion preset %s not found in built-in presets.", exclude.name)
+                continue
+            excludes += f"\n# {exclude.name}\n"
+            for pattern in allPresets[exclude.name]['patterns']:
+                excludes += f"{pattern}\n"
+
+        return excludes
+
+    class Meta:
+        database = DB
+
+
+class ExclusionModel(BaseModel):
+    """
+    If this is a user created exclusion, the name will be the same as the pattern added. For exclusions added from
+    presets, the name will be the same as the preset name. Duplicate patterns are already handled by Borg.
+    """
+
+    class SourceFieldOptions(Enum):
+        CUSTOM = 'custom'
+        PRESET = 'preset'
+
+    profile = pw.ForeignKeyField(BackupProfileModel, backref='exclusions')
+    name = pw.CharField()
+    enabled = pw.BooleanField(default=True)
+    source = pw.CharField(default=SourceFieldOptions.CUSTOM.value)
 
     class Meta:
         database = DB
@@ -130,6 +202,7 @@ class ArchiveModel(BaseModel):
     time = pw.DateTimeField()
     duration = pw.FloatField(null=True)
     size = pw.IntegerField(null=True)
+    trigger = pw.CharField(null=True)
 
     def formatted_time(self):
         return
@@ -185,6 +258,7 @@ class SettingsModel(BaseModel):
     str_value = pw.CharField(default='')
     label = pw.CharField()
     group = pw.CharField(default='')  # Settings group name and label
+    tooltip = pw.CharField(default='')  # optional tooltip for `checkbox` type
     type = pw.CharField()
 
     class Meta:

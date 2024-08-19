@@ -1,12 +1,13 @@
 from vorta.store.models import RepoModel
-from vorta.utils import format_archive_name
+from vorta.utils import borg_compat, format_archive_name
+
 from .borg_job import BorgJob
 
 
 class BorgPruneJob(BorgJob):
     def started_event(self):
         self.app.backup_started_event.emit()
-        self.app.backup_progress_event.emit(self.tr('Pruning old archives…'))
+        self.app.backup_progress_event.emit(f"[{self.params['profile_name']}] {self.tr('Pruning old archives…')}")
 
     def finished_event(self, result):
         # set repo stats to N/A
@@ -19,7 +20,7 @@ class BorgPruneJob(BorgJob):
 
         self.app.backup_finished_event.emit(result)
         self.result.emit(result)
-        self.app.backup_progress_event.emit(self.tr('Pruning done.'))
+        self.app.backup_progress_event.emit(f"[{self.params['profile_name']}] {self.tr('Pruning done.')}")
 
     @classmethod
     def prepare(cls, profile):
@@ -46,12 +47,21 @@ class BorgPruneJob(BorgJob):
 
         if profile.prune_prefix:
             formatted_prune_prefix = format_archive_name(profile, profile.prune_prefix)
-            pruning_opts += ['--prefix', formatted_prune_prefix]
+
+            if borg_compat.check('V2'):
+                pruning_opts += ['-a', f"sh:{formatted_prune_prefix}*"]
+            elif borg_compat.check('V122'):
+                pruning_opts += ['-a', f"{formatted_prune_prefix}*"]
+            else:
+                pruning_opts += ['--prefix', formatted_prune_prefix]
 
         if profile.prune_keep_within:
             pruning_opts += ['--keep-within', profile.prune_keep_within]
         cmd += pruning_opts
-        cmd.append(f'{profile.repo.url}')
+        if borg_compat.check('V2'):
+            cmd.extend(["-r", profile.repo.url])
+        else:
+            cmd.append(f'{profile.repo.url}')
 
         ret['ok'] = True
         ret['cmd'] = cmd

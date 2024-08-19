@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Report a bug or a similiar issue - the classic way
+about: Report a bug or a similar issue - the classic way
 title: ''
 labels: ''
 assignees: ''
@@ -18,7 +18,7 @@ If you want to suggest a feature or have any other question, please use our
 #### Description
 
 <!-- Description
-Please decribe your issue and its context in a clear and concise way.
+Please describe your issue and its context in a clear and concise way.
 Please try to reproduce the issue and provide the steps to reproduce it.
 -->
 
@@ -39,12 +39,12 @@ Steps to reproduce the behavior:
 - Installed from:
 - Borg version:
 
-<!-- Vorta and Borg versions can be found in Main Window > Misc Tab. -->
+<!-- Vorta and Borg versions can be found in Main Window > Settings/About > About Tab. -->
 
 #### Logs
 
 <!-- Logs are very important for most issues. Please paste them down below.
-They can be found in Main Window > Misc Tab > Log.
+They can be found in Main Window > Settings/About > About Tab.
 Logs are more helpful if you include (exactly) the logs that were produced during the steps you described above.
 -->
 

@@ -1,17 +1,21 @@
 import logging
 import os
 from pathlib import Path
-from PyQt5 import uic
-from PyQt5.QtWidgets import QFileDialog, QMessageBox
+
+from PyQt6 import uic
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QFileDialog, QMessageBox
+
 from vorta.keyring.abc import VortaKeyring
 from vorta.store.models import BackupProfileModel  # noqa: F401
 from vorta.utils import get_asset
+
 from ..notifications import VortaNotifications
 from ..profile_export import ProfileExport
 
-uifile_import = get_asset('UI/exportwindow.ui')
+uifile_import = get_asset('UI/export_window.ui')
 ExportWindowUI, ExportWindowBase = uic.loadUiType(uifile_import)
-uifile_export = get_asset('UI/importwindow.ui')
+uifile_export = get_asset('UI/import_window.ui')
 ImportWindowUI, ImportWindowBase = uic.loadUiType(uifile_export)
 logger = logging.getLogger(__name__)
 
@@ -31,7 +35,7 @@ class ExportWindow(ExportWindowBase, ExportWindowUI):
         self.keyring = VortaKeyring.get_keyring()
         profile = self.profile
         if profile.repo is None or self.keyring.get_password('vorta-repo', profile.repo.url) is None:
-            self.storePassword.setCheckState(False)
+            self.storePassword.setCheckState(Qt.CheckState(False))
             self.storePassword.setDisabled(True)
             self.storePassword.setToolTip(self.tr('Disclose your borg passphrase (No passphrase set)'))
 

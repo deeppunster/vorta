@@ -1,38 +1,36 @@
 import os
 import signal
 import sys
+
 from peewee import SqliteDatabase
+
+# Need to import config as a whole module instead of individual variables
+# because we will be overriding the modules variables
+from vorta import config
 from vorta._version import __version__
-from vorta.config import SETTINGS_DIR
-from vorta.i18n import trans_late, translate
 from vorta.log import init_logger, logger
 from vorta.store.connection import init_db
 from vorta.updater import get_updater
-from vorta.utils import parse_args
+from vorta.utils import DEFAULT_DIR_FLAG, parse_args
+from vorta.views.exception_dialog import ExceptionDialog
 
 
 def main():
     def exception_handler(type, value, tb):
         from traceback import format_exception
-        from PyQt5.QtWidgets import QMessageBox
 
         logger.critical(
-            "Uncaught exception, file a report at https://github.com/borgbase/vorta/issues/new",
+            "Uncaught exception, file a report at https://github.com/borgbase/vorta/issues/new/choose",
             exc_info=(type, value, tb),
         )
         full_exception = ''.join(format_exception(type, value, tb))
-        title = trans_late('app', 'Fatal Error')
-        error_message = trans_late(
-            'app',
-            'Uncaught exception, please file a report with this text at\n'
-            'https://github.com/borgbase/vorta/issues/new\n',
-        )
+
         if app:
-            QMessageBox.critical(
-                None,
-                translate('app', title),
-                translate('app', error_message) + full_exception,
-            )
+            exception_dialog = ExceptionDialog(full_exception)
+            exception_dialog.show()
+            exception_dialog.raise_()
+            exception_dialog.activateWindow()
+            exception_dialog.exec()
         else:
             # Crashed before app startup, cannot translate
             sys.exit(1)
@@ -45,20 +43,30 @@ def main():
 
     want_version = getattr(args, 'version', False)
     want_background = getattr(args, 'daemonize', False)
+    want_development = getattr(args, 'development', False)
 
     if want_version:
-        print(f"Vorta {__version__}")
+        print(f"Vorta {__version__}")  # noqa: T201
         sys.exit()
 
     if want_background:
         if os.fork():
             sys.exit()
 
+    if want_development:
+        # if we're using the default dev dir
+        if want_development is DEFAULT_DIR_FLAG:
+            config.init_dev_mode(config.default_dev_dir())
+        else:
+            # if we're not using the default dev dir and
+            # instead we're using whatever dir is passed as an argument
+            config.init_dev_mode(want_development)
+
     init_logger(background=want_background)
 
     # Init database
     sqlite_db = SqliteDatabase(
-        os.path.join(SETTINGS_DIR, 'settings.db'),
+        config.SETTINGS_DIR / 'settings.db',
         pragmas={
             'journal_mode': 'wal',
         },

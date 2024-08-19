@@ -1,6 +1,8 @@
 from datetime import datetime
+
 import peewee as pw
 from playhouse.migrate import SqliteMigrator, migrate
+
 from .models import (
     DB,
     ArchiveModel,
@@ -217,6 +219,51 @@ def run_migrations(current_schema, db_connection):
             current_schema,
             19,
             migrator.add_column(SettingsModel._meta.table_name, 'group', pw.CharField(default='')),
+        )
+
+    if current_schema.version < 20:
+        _apply_schema_update(
+            current_schema,
+            20,
+            migrator.add_column(SettingsModel._meta.table_name, 'tooltip', pw.CharField(default='')),
+        )
+
+    if current_schema.version < 21:
+        _apply_schema_update(
+            current_schema,
+            21,
+            migrator.add_column(
+                ArchiveModel._meta.table_name,
+                'trigger',
+                pw.CharField(null=True),
+            ),
+        )
+
+    if current_schema.version < 22:
+        _apply_schema_update(
+            current_schema,
+            22,
+            migrator.add_column(
+                RepoModel._meta.table_name,
+                'name',
+                pw.CharField(default=''),
+            ),
+        )
+
+    if current_schema.version < 23:
+        _apply_schema_update(
+            current_schema,
+            23,
+            migrator.add_column(
+                BackupProfileModel._meta.table_name,
+                'compaction_on',
+                pw.BooleanField(default=True),
+            ),
+            migrator.add_column(
+                BackupProfileModel._meta.table_name,
+                'compaction_weeks',
+                pw.IntegerField(default=3),
+            ),
         )
 
 

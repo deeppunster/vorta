@@ -1,4 +1,6 @@
 from vorta.store.models import ArchiveModel, RepoModel
+from vorta.utils import borg_compat
+
 from .borg_job import BorgJob
 
 
@@ -7,7 +9,7 @@ class BorgRenameJob(BorgJob):
         self.app.backup_log_event.emit(msg)
 
     @classmethod
-    def prepare(cls, profile):
+    def prepare(cls, profile, old_archive_name, new_archive_name):
         ret = super().prepare(profile)
         if not ret['ok']:
             return ret
@@ -15,8 +17,14 @@ class BorgRenameJob(BorgJob):
             ret['ok'] = False  # Set back to false, so we can do our own checks here.
 
         cmd = ['borg', 'rename', '--info', '--log-json']
-        cmd.append(f'{profile.repo.url}')
+        if borg_compat.check('V2'):
+            cmd.extend(["-r", profile.repo.url, old_archive_name, new_archive_name])
+        else:
+            cmd.extend([f'{profile.repo.url}::{old_archive_name}', new_archive_name])
 
+        ret['old_archive_name'] = old_archive_name
+        ret['new_archive_name'] = new_archive_name
+        ret['repo_url'] = profile.repo.url
         ret['ok'] = True
         ret['cmd'] = cmd
 
@@ -24,9 +32,7 @@ class BorgRenameJob(BorgJob):
 
     def process_result(self, result):
         if result['returncode'] == 0:
-            repo_url, old_name = result['cmd'][-2].split('::')
-            new_name = result['cmd'][-1]
-            repo = RepoModel.get(url=repo_url)
-            renamed_archive = ArchiveModel.get(name=old_name, repo=repo)
-            renamed_archive.name = new_name
+            repo = RepoModel.get(url=result['params']['repo_url'])
+            renamed_archive = ArchiveModel.get(name=result['params']['old_archive_name'], repo=repo)
+            renamed_archive.name = result['params']['new_archive_name']
             renamed_archive.save()

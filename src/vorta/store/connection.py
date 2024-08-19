@@ -1,14 +1,20 @@
 import os
+import shutil
 from datetime import datetime, timedelta
+
 from peewee import Tuple, fn
 from playhouse import signals
+
+from vorta import config
 from vorta.autostart import open_app_at_startup
+
 from .migrations import run_migrations
 from .models import (
     DB,
     ArchiveModel,
     BackupProfileModel,
     EventLogModel,
+    ExclusionModel,
     RepoModel,
     RepoPassword,
     SchemaVersion,
@@ -18,7 +24,7 @@ from .models import (
 )
 from .settings import get_misc_settings
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 23
 
 
 @signals.post_save(sender=SettingsModel)
@@ -49,6 +55,7 @@ def init_db(con=None):
             WifiSettingModel,
             EventLogModel,
             SchemaVersion,
+            ExclusionModel,
         ]
     )
 
@@ -80,6 +87,7 @@ def init_db(con=None):
     if created or current_schema.version == SCHEMA_VERSION:
         pass
     else:
+        backup_current_db(current_schema.version)
         run_migrations(current_schema, con)
 
     # Create missing settings and update labels.
@@ -91,5 +99,17 @@ def init_db(con=None):
 
         if 'group' in setting:
             s.group = setting['group']
+        if 'tooltip' in setting:
+            s.tooltip = setting['tooltip']
 
         s.save()
+
+
+def backup_current_db(schema_version):
+    """
+    Creates a backup copy of settings.db
+    """
+
+    timestamp = datetime.now().strftime('%Y-%m-%d-%H%M%S')
+    backup_file_name = f'settings_v{schema_version}_{timestamp}.db'
+    shutil.copy(config.SETTINGS_DIR / 'settings.db', config.SETTINGS_DIR / backup_file_name)

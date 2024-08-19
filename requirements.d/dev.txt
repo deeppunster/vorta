@@ -1,8 +1,10 @@
-black
+black==22.*
 coverage
 flake8
-isort
 macholib
+nox
+pkgconfig
+pre-commit
 pyinstaller
 pylint
 pytest
@@ -10,7 +12,7 @@ pytest-cov
 pytest-faulthandler
 pytest-mock
 pytest-qt
+ruff
 tox
-transifex-client
 twine
 wheel

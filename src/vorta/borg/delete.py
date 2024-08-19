@@ -1,12 +1,15 @@
 from typing import List
+
 from vorta.store.models import RepoModel
+from vorta.utils import borg_compat
+
 from .borg_job import BorgJob
 
 
 class BorgDeleteJob(BorgJob):
     def started_event(self):
         self.app.backup_started_event.emit()
-        self.app.backup_progress_event.emit(self.tr('Deleting archive…'))
+        self.app.backup_progress_event.emit(f"[{self.params['profile_name']}] {self.tr('Deleting archive…')}")
 
     def finished_event(self, result):
         # set repo stats to N/A
@@ -19,7 +22,7 @@ class BorgDeleteJob(BorgJob):
 
         self.app.backup_finished_event.emit(result)
         self.result.emit(result)
-        self.app.backup_progress_event.emit(self.tr('Archive deleted.'))
+        self.app.backup_progress_event.emit(f"[{self.params['profile_name']}] {self.tr('Archive deleted.')}")
 
     @classmethod
     def prepare(cls, profile, archives: List[str]):
@@ -33,8 +36,12 @@ class BorgDeleteJob(BorgJob):
             return ret
 
         cmd = ['borg', 'delete', '--info', '--log-json']
-        cmd.append(f'{profile.repo.url}::{archives[0]}')
-        cmd.extend(archives[1:])
+        if borg_compat.check('V2'):
+            cmd = cmd + ["-r", profile.repo.url, '-a']
+            cmd.append(f"re:({'|'.join(archives)})")
+        else:
+            cmd.append(f'{profile.repo.url}::{archives[0]}')
+            cmd.extend(archives[1:])
 
         ret['archives'] = archives
         ret['cmd'] = cmd

@@ -4,17 +4,22 @@ import threading
 from datetime import datetime as dt
 from datetime import timedelta
 from typing import Dict, NamedTuple, Optional, Tuple, Union
-from PyQt5 import QtCore
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QApplication
+
+from packaging import version
+from PyQt6 import QtCore, QtDBus
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import QApplication
+
 from vorta import application
 from vorta.borg.check import BorgCheckJob
+from vorta.borg.compact import BorgCompactJob
 from vorta.borg.create import BorgCreateJob
 from vorta.borg.list_repo import BorgListRepoJob
 from vorta.borg.prune import BorgPruneJob
 from vorta.i18n import translate
 from vorta.notifications import VortaNotifications
 from vorta.store.models import BackupProfileModel, EventLogModel
+from vorta.utils import borg_compat
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +37,6 @@ class ScheduleStatus(NamedTuple):
 
 
 class VortaScheduler(QtCore.QObject):
-
     #: The schedule for the profile with the given id changed.
     schedule_changed = QtCore.pyqtSignal(int)
 
@@ -57,6 +61,25 @@ class VortaScheduler(QtCore.QObject):
 
         # connect signals
         self.app.backup_finished_event.connect(lambda res: self.set_timer_for_profile(res['params']['profile_id']))
+
+        # connect to `systemd-logind` to receive sleep/resume events
+        # The signal `PrepareForSleep` will be emitted before and after hibernation.
+        service = "org.freedesktop.login1"
+        path = "/org/freedesktop/login1"
+        interface = "org.freedesktop.login1.Manager"
+        name = "PrepareForSleep"
+        bus = QtDBus.QDBusConnection.systemBus()
+        if bus.isConnected() and bus.interface().isServiceRegistered(service).value():
+            self.bus = bus
+            self.bus.connect(service, path, interface, name, "b", self.loginSuspendNotify)
+        else:
+            logger.warning('Failed to connect to DBUS interface to detect sleep/resume events')
+
+    @QtCore.pyqtSlot(bool)
+    def loginSuspendNotify(self, suspend: bool):
+        if not suspend:
+            logger.debug("Got login suspend/resume notification")
+            self.reload_all_timers()
 
     def tr(self, *args, **kwargs):
         scope = self.__class__.__name__
@@ -177,7 +200,6 @@ class VortaScheduler(QtCore.QObject):
             return
 
         with self.lock:  # Acquire lock
-
             self.remove_job(profile_id)  # reset schedule
 
             pause = self.pauses.get(profile_id)
@@ -271,7 +293,6 @@ class VortaScheduler(QtCore.QObject):
 
             # handle missing of a scheduled time
             if next_time <= dt.now():
-
                 if profile.schedule_make_up_missed:
                     self.lock.release()
                     try:
@@ -425,7 +446,7 @@ class VortaScheduler(QtCore.QObject):
         else:
             notifier.deliver(
                 self.tr('Vorta Backup'),
-                self.tr('Error during backup creation.'),
+                self.tr('Error during backup creation for %s.') % profile_name,
                 level='error',
             )
             logger.error('Error during backup creation.')
@@ -441,6 +462,7 @@ class VortaScheduler(QtCore.QObject):
         Pruning and checking after successful backup.
         """
         profile = BackupProfileModel.get(id=profile_id)
+        notifier = VortaNotifications.pick()
         logger.info('Doing post-backup jobs for %s', profile.name)
         if profile.prune_on:
             msg = BorgPruneJob.prepare(profile)
@@ -470,7 +492,33 @@ class VortaScheduler(QtCore.QObject):
                 job = BorgCheckJob(msg['cmd'], msg, profile.repo.id)
                 self.app.jobs_manager.add_job(job)
 
+        compaction_cutoff = dt.now() - timedelta(days=7 * profile.compaction_weeks)
+        recent_compactions = (
+            EventLogModel.select()
+            .where(
+                (EventLogModel.subcommand == '--info')
+                & (EventLogModel.start_time > compaction_cutoff)
+                & (EventLogModel.repo_url == profile.repo.url)
+            )
+            .count()
+        )
+
+        if (
+            profile.compaction_on
+            and recent_compactions == 0
+            and version.parse(borg_compat.version) >= version.parse("1.2")
+        ):
+            msg = BorgCompactJob.prepare(profile)
+            if msg['ok']:
+                job = BorgCompactJob(msg['cmd'], msg, profile.repo.id)
+                self.app.jobs_manager.add_job(job)
+
         logger.info('Finished background task for profile %s', profile.name)
+        notifier.deliver(
+            self.tr('Vorta Backup'),
+            self.tr('Post Backup Tasks successful for %s' % profile.name),
+            level='info',
+        )
 
     def remove_job(self, profile_id):
         if profile_id in self.timers:

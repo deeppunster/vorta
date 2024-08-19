@@ -1,37 +1,50 @@
 import logging
-from PyQt5 import uic
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QCheckBox, QFormLayout, QLabel, QSizePolicy, QSpacerItem
-from vorta._version import __version__
-from vorta.config import LOG_DIR
+
+from PyQt6 import QtCore, uic
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QSpacerItem,
+)
+
 from vorta.i18n import translate
 from vorta.store.models import BackupProfileMixin, SettingsModel
 from vorta.store.settings import get_misc_settings
 from vorta.utils import get_asset, search
+from vorta.views.partials.tooltip_button import ToolTipButton
+from vorta.views.utils import get_colored_icon
 
-uifile = get_asset('UI/misctab.ui')
+uifile = get_asset('UI/misc_tab.ui')
 MiscTabUI, MiscTabBase = uic.loadUiType(uifile)
 
 logger = logging.getLogger(__name__)
 
 
 class MiscTab(MiscTabBase, MiscTabUI, BackupProfileMixin):
+    refresh_archive = QtCore.pyqtSignal()
+
     def __init__(self, parent=None):
         """Init."""
         super().__init__(parent)
         self.setupUi(parent)
-        self.versionLabel.setText(__version__)
-        self.logLink.setText(
-            f'<a href="file://{LOG_DIR}"><span style="text-decoration:' 'underline; color:#0984e3;">Log</span></a>'
-        )
 
         self.checkboxLayout = QFormLayout(self.frameSettings)
         self.checkboxLayout.setSpacing(4)
         self.checkboxLayout.setHorizontalSpacing(8)
         self.checkboxLayout.setContentsMargins(0, 0, 0, 12)
+        self.checkboxLayout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.checkboxLayout.setFormAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.tooltip_buttons = []
 
         self.populate()
+
+        # Connect to palette change
+        QApplication.instance().paletteChanged.connect(lambda p: self.set_icons())
 
     def populate(self):
         """
@@ -45,6 +58,7 @@ class MiscTab(MiscTabBase, MiscTabUI, BackupProfileMixin):
             self.checkboxLayout.removeItem(child)
             if child.widget():
                 child.widget().deleteLater()
+        self.tooltip_buttons = []
 
         # dynamically add widgets for settings
         misc_settings = get_misc_settings()
@@ -78,21 +92,37 @@ class MiscTab(MiscTabBase, MiscTabUI, BackupProfileMixin):
 
                 # create widget
                 cb = QCheckBox(translate('settings', setting.label))
-                cb.setCheckState(setting.value)
+                cb.setToolTip(setting.tooltip)
+                cb.setCheckState(Qt.CheckState(setting.value))
                 cb.setTristate(False)
                 cb.stateChanged.connect(lambda v, key=setting.key: self.save_setting(key, v))
+                if setting.key == 'enable_fixed_units':
+                    cb.stateChanged.connect(self.refresh_archive.emit)
+
+                tb = ToolTipButton()
+                tb.setToolTip(setting.tooltip)
+
+                cbl = QHBoxLayout()
+                cbl.addWidget(cb)
+                if setting.tooltip:
+                    cbl.addWidget(tb)
+                cbl.addItem(QSpacerItem(0, 0, hPolicy=QSizePolicy.Policy.Expanding))
 
                 # add widget
-                self.checkboxLayout.setWidget(i, QFormLayout.ItemRole.FieldRole, cb)
+                self.checkboxLayout.setLayout(i, QFormLayout.ItemRole.FieldRole, cbl)
+                self.tooltip_buttons.append(tb)
 
                 # increase i
                 i += 1
+
+        self.set_icons()
+
+    def set_icons(self):
+        """Set or update the icons in this view."""
+        for button in self.tooltip_buttons:
+            button.setIcon(get_colored_icon('help-about'))
 
     def save_setting(self, key, new_value):
         setting = SettingsModel.get(key=key)
         setting.value = bool(new_value)
         setting.save()
-
-    def set_borg_details(self, version, path):
-        self.borgVersion.setText(version)
-        self.borgPath.setText(path)

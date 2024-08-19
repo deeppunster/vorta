@@ -1,4 +1,6 @@
 from vorta.store.models import RepoModel
+from vorta.utils import borg_compat
+
 from .borg_job import BorgJob, FakeProfile, FakeRepo
 
 
@@ -14,6 +16,7 @@ class BorgInitJob(BorgJob):
             999,
             FakeRepo(
                 params['repo_url'],
+                params['repo_name'],
                 999,
                 params['extra_borg_arguments'],
                 params['encryption'],
@@ -28,9 +31,20 @@ class BorgInitJob(BorgJob):
         else:
             ret['ok'] = False  # Set back to false, so we can do our own checks here.
 
-        cmd = ["borg", "init", "--info", "--log-json"]
-        cmd.append(f"--encryption={params['encryption']}")
-        cmd.append(params['repo_url'])
+        if borg_compat.check('V2'):
+            cmd = [
+                "borg",
+                "rcreate",
+                "--info",
+                "--log-json",
+                f"--encryption={params['encryption']}",
+                "-r",
+                params['repo_url'],
+            ]
+        else:
+            cmd = ["borg", "init", "--info", "--log-json"]
+            cmd.append(f"--encryption={params['encryption']}")
+            cmd.append(params['repo_url'])
 
         ret['additional_env'] = {'BORG_RSH': 'ssh -oStrictHostKeyChecking=accept-new'}
 
@@ -48,6 +62,7 @@ class BorgInitJob(BorgJob):
                 defaults={
                     'encryption': result['params']['encryption'],
                     'extra_borg_arguments': result['params']['extra_borg_arguments'],
+                    'name': result['params']['repo_name'],
                 },
             )
             if new_repo.encryption != 'none':

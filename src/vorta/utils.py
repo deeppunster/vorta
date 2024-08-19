@@ -2,29 +2,30 @@ import argparse
 import errno
 import fnmatch
 import getpass
+import math
 import os
-import platform
 import re
+import socket
 import sys
 import unicodedata
 from datetime import datetime as dt
 from functools import reduce
-from typing import Any, Callable, Iterable, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Tuple, TypeVar
+
 import psutil
-from paramiko import SSHException
-from paramiko.ecdsakey import ECDSAKey
-from paramiko.ed25519key import Ed25519Key
-from paramiko.rsakey import RSAKey
-from PyQt5 import QtCore
-from PyQt5.QtCore import QFileInfo, QThread, pyqtSignal
-from PyQt5.QtWidgets import QApplication, QFileDialog, QSystemTrayIcon
+from PyQt6 import QtCore
+from PyQt6.QtCore import QFileInfo, QThread, pyqtSignal
+from PyQt6.QtWidgets import QApplication, QFileDialog, QSystemTrayIcon
+
 from vorta.borg._compatibility import BorgCompatibility
-from vorta.i18n import trans_late
 from vorta.log import logger
 from vorta.network_status.abc import NetworkStatusMonitor
 
-QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)  # enable highdpi scaling
-QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)  # use highdpi icons
+# Used to store whether a user wanted to override the
+# default directory for the --development flag
+DEFAULT_DIR_FLAG = object()
+METRIC_UNITS = ['', 'K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y']
+NONMETRIC_UNITS = ['', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi', 'Yi']
 
 borg_compat = BorgCompatibility()
 _network_status_monitor = None
@@ -141,14 +142,10 @@ def get_network_status_monitor():
 
 def get_path_datasize(path, exclude_patterns):
     file_info = QFileInfo(path)
-    data_size = 0
 
     if file_info.isDir():
         data_size, files_count = get_directory_size(file_info.absoluteFilePath(), exclude_patterns)
-        # logger.info("path (folder) %s %u elements size now=%u (%s)",
-        #            file_info.absoluteFilePath(), files_count, data_size, pretty_bytes(data_size))
     else:
-        # logger.info("path (file) %s size=%u", file_info.path(), file_info.size())
         data_size = file_info.size()
         files_count = 1
 
@@ -171,16 +168,26 @@ def get_dict_from_list(dataDict, mapList):
 
 def choose_file_dialog(parent, title, want_folder=True):
     dialog = QFileDialog(parent, title, os.path.expanduser('~'))
-    dialog.setFileMode(QFileDialog.Directory if want_folder else QFileDialog.ExistingFiles)
-    dialog.setParent(parent, QtCore.Qt.Sheet)
+    dialog.setFileMode(QFileDialog.FileMode.Directory if want_folder else QFileDialog.FileMode.ExistingFiles)
+    dialog.setParent(parent, QtCore.Qt.WindowType.Sheet)
     if want_folder:
-        dialog.setOption(QFileDialog.ShowDirsOnly)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly)
     return dialog
 
 
-def get_private_keys():
+def is_ssh_private_key_file(filepath: str) -> bool:
+    """Check if the file is a SSH key."""
+    try:
+        with open(filepath, 'r') as f:
+            first_line = f.readline()
+        pattern = r'^-----BEGIN(\s\w+)? PRIVATE KEY-----'
+        return re.match(pattern, first_line) is not None
+    except UnicodeDecodeError:
+        return False
+
+
+def get_private_keys() -> List[str]:
     """Find SSH keys in standard folder."""
-    key_formats = [RSAKey, ECDSAKey, Ed25519Key]
 
     ssh_folder = os.path.expanduser('~/.ssh')
 
@@ -190,35 +197,25 @@ def get_private_keys():
             key_file = os.path.join(ssh_folder, key)
             if not os.path.isfile(key_file):
                 continue
-            for key_format in key_formats:
-                try:
-                    parsed_key = key_format.from_private_key_file(key_file)
-                    key_details = {
-                        'filename': key,
-                        'format': parsed_key.get_name(),
-                        'bits': parsed_key.get_bits(),
-                        'fingerprint': parsed_key.get_fingerprint().hex(),
-                    }
-                    available_private_keys.append(key_details)
-                except (
-                    SSHException,
-                    UnicodeDecodeError,
-                    IsADirectoryError,
-                    IndexError,
-                    ValueError,
-                    PermissionError,
-                    NotImplementedError,
-                ):
-                    logger.debug(
-                        f'Expected error parsing file in .ssh: {key} (You can safely ignore this)', exc_info=True
-                    )
-                    continue
-                except OSError as e:
-                    if e.errno == errno.ENXIO:
-                        # when key_file is a (ControlPath) socket
-                        continue
+            # ignore config, known_hosts*, *.pub, etc.
+            if key.endswith('.pub') or key.startswith('known_hosts') or key == 'config':
+                continue
+            try:
+                if is_ssh_private_key_file(key_file):
+                    if os.stat(key_file).st_mode & 0o077 == 0:
+                        available_private_keys.append(key)
                     else:
-                        raise
+                        logger.warning(f'Permissions for {key_file} are too open.')
+                else:
+                    logger.debug(f'Not a private SSH key file: {key}')
+            except PermissionError:
+                logger.warning(f'Permission error while opening file: {key_file}', exc_info=True)
+                continue
+            except OSError as e:
+                if e.errno == errno.ENXIO:
+                    # when key_file is a (ControlPath) socket
+                    continue
+                raise
 
     return available_private_keys
 
@@ -226,7 +223,7 @@ def get_private_keys():
 def sort_sizes(size_list):
     """Sorts sizes with extensions. Assumes that size is already in largest unit possible"""
     final_list = []
-    for suffix in [" B", " KB", " MB", " GB", " TB"]:
+    for suffix in [" B", " KB", " MB", " GB", " TB", " PB", " EB", " ZB", " YB"]:
         sub_list = [
             float(size[: -len(suffix)])
             for size in size_list
@@ -240,24 +237,59 @@ def sort_sizes(size_list):
     return final_list
 
 
-def pretty_bytes(size, metric=True, sign=False, precision=1):
+Number = TypeVar("Number", int, float)
+
+
+def clamp(n: Number, min_: Number, max_: Number) -> Number:
+    """Restrict the number n inside a range"""
+    return min(max_, max(n, min_))
+
+
+def find_best_unit_for_sizes(sizes: Iterable[int], metric: bool = True, precision: int = 1) -> int:
+    """
+    Selects the index of the biggest unit (see the lists in the pretty_bytes function) capable of
+    representing the smallest size in the sizes iterable.
+    """
+    min_size = min((s for s in sizes if isinstance(s, int)), default=None)
+    return find_best_unit_for_size(min_size, metric=metric, precision=precision)
+
+
+def find_best_unit_for_size(size: Optional[int], metric: bool = True, precision: int = 1) -> int:
+    """
+    Selects the index of the biggest unit (see the lists in the pretty_bytes function) capable of
+    representing the passed size.
+    """
+    if not isinstance(size, int) or size == 0:  # this will also take care of the None case
+        return 0
+    power = 10**3 if metric else 2**10
+    n = math.floor(math.log(abs(size) * 10**precision, power))
+    return n
+
+
+def pretty_bytes(
+    size: int, metric: bool = True, sign: bool = False, precision: int = 1, fixed_unit: Optional[int] = None
+) -> str:
+    """
+    Formats the size with the requested unit and precision. The find_best_size_unit function
+    can be used to find the correct unit for a list of sizes. If no fixed_unit is passed it will
+    find the biggest unit to represent the size
+    """
     if not isinstance(size, int):
         return ''
     prefix = '+' if sign and size > 0 else ''
-    power, units = (
-        (10**3, ['', 'K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y'])
-        if metric
-        else (2**10, ['', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi', 'Yi'])
-    )
-    n = 0
-    while abs(round(size, precision)) >= power and n + 1 < len(units):
-        size /= power
-        n += 1
+    power, units = (10**3, METRIC_UNITS) if metric else (2**10, NONMETRIC_UNITS)
+    if fixed_unit is None:
+        n = find_best_unit_for_size(size, metric=metric, precision=precision)
+    else:
+        n = fixed_unit
+    n = clamp(n, 0, len(units) - 1)
+    size /= power**n
     try:
         unit = units[n]
-        return f'{prefix}{round(size, precision)} {unit}B'
-    except KeyError as e:
-        logger.error(e)
+        digits = f'%.{precision}f' % (round(size, precision))
+        return f'{prefix}{digits} {unit}B'
+    except KeyError as error:
+        logger.error(error)
         return "NaN"
 
 
@@ -318,7 +350,21 @@ def parse_args():
         help='Create a backup in the background using the given profile. '
         'Vorta must already be running for this to work.',
     )
-
+    # the "development" attribute will be None if the flag is not called
+    # if the flag is called without an extra argument, the "development" attribute
+    # will be set to the value of DEFAULT_DIR_FLAG.
+    # if the flag is called with an extra argument, the "development" attribute
+    # will be set to that argument
+    parser.add_argument(
+        '--development',
+        '-D',
+        nargs='?',
+        const=DEFAULT_DIR_FLAG,
+        metavar="CONFIG_DIRECTORY",
+        help='Start vorta in a local development environment. '
+        'All log, config, cache, and temp files will be stored within the project tree. '
+        'You can follow this flag with an optional path and it will store the files in the provided location.',
+    )
     return parser.parse_known_args()[0]
 
 
@@ -343,12 +389,36 @@ def uses_dark_mode():
     return palette.windowText().color().lightness() > palette.window().color().lightness()
 
 
+# patched socket.getfqdn() - see https://bugs.python.org/issue5004
+# Reused with permission from https://github.com/borgbackup/borg/blob/master/src/borg/platform/base.py (BSD-3-Clause)
+def _getfqdn(name=""):
+    """Get fully qualified domain name from name.
+    An empty argument is interpreted as meaning the local host.
+    """
+    name = name.strip()
+    if not name or name == "0.0.0.0":
+        name = socket.gethostname()
+    try:
+        addrs = socket.getaddrinfo(name, None, 0, socket.SOCK_DGRAM, 0, socket.AI_CANONNAME)
+    except OSError:
+        pass
+    else:
+        for addr in addrs:
+            if addr[3]:
+                name = addr[3]
+                break
+    return name
+
+
 def format_archive_name(profile, archive_name_tpl):
     """
     Generate an archive name. Default set in models.BackupProfileModel
     """
+    hostname = socket.gethostname()
+    hostname = hostname.split(".")[0]
     available_vars = {
-        'hostname': platform.node(),
+        'hostname': hostname,
+        'fqdn': _getfqdn(hostname),
         'profile_id': profile.id,
         'profile_slug': profile.slug(),
         'now': dt.now(),
@@ -358,39 +428,76 @@ def format_archive_name(profile, archive_name_tpl):
     return archive_name_tpl.format(**available_vars)
 
 
+SHELL_PATTERN_ELEMENT = re.compile(r'([?\[\]*])')
+
+
+def is_mount_command(proc):
+    try:
+        name = proc.name()
+        if name == 'borg' or name.startswith('python'):
+            if 'mount' in proc.cmdline():
+                return True
+    except (psutil.ZombieProcess, psutil.AccessDenied, psutil.NoSuchProcess):
+        pass
+    return False
+
+
+def extract_mount_points_v2(proc, repo_url):
+    mount_points = {}
+    repo_mounts = []
+
+    cmd = proc.cmdline()
+    if repo_url in cmd:
+        i = cmd.index(repo_url)
+        if len(cmd) > i + 1:
+            mount_point = cmd[i + 1]
+
+            ao = '-a' in cmd
+            if ao or '--match-archives' in cmd:
+                i = cmd.index('-a' if ao else '--match-archives')
+                if len(cmd) >= i + 1 and not SHELL_PATTERN_ELEMENT.search(cmd[i + 1]):
+                    mount_points[mount_point] = cmd[i + 1]
+            else:
+                repo_mounts.append(mount_point)
+
+    return mount_points, repo_mounts
+
+
+def extract_mount_points_v1(proc, repo_url):
+    mount_points = {}
+    repo_mounts = []
+
+    for idx, parameter in enumerate(proc.cmdline()):
+        if parameter.startswith(repo_url):
+
+            if len(proc.cmdline()) > idx + 1:
+                mount_point = proc.cmdline()[idx + 1]
+
+                if parameter[len(repo_url) :].startswith('::'):
+                    archive_name = parameter[len(repo_url) + 2 :]
+                    mount_points[archive_name] = mount_point
+                else:
+                    repo_mounts.append(mount_point)
+
+    return mount_points, repo_mounts
+
+
 def get_mount_points(repo_url):
     mount_points = {}
     repo_mounts = []
+
     for proc in psutil.process_iter():
-        try:
-            name = proc.name()
-            if name == 'borg' or name.startswith('python'):
-                if 'mount' not in proc.cmdline():
-                    continue
-
-                for idx, parameter in enumerate(proc.cmdline()):
-                    if parameter.startswith(repo_url):
-                        # mount from this repo
-
-                        # The borg mount command specifies that the mount_point
-                        # parameter comes after the archive name
-                        if len(proc.cmdline()) > idx + 1:
-                            mount_point = proc.cmdline()[idx + 1]
-
-                            # archive or full mount?
-                            if parameter[len(repo_url) :].startswith('::'):
-                                archive_name = parameter[len(repo_url) + 2 :]
-                                mount_points[archive_name] = mount_point
-                                break
-                            else:
-                                # repo mount point
-                                repo_mounts.append(mount_point)
-
-        except (psutil.ZombieProcess, psutil.AccessDenied, psutil.NoSuchProcess):
-            # Getting process details may fail (e.g. zombie process on macOS)
-            # or because the process is owned by another user.
-            # Also see https://github.com/giampaolo/psutil/issues/783
+        if not is_mount_command(proc):
             continue
+
+        if borg_compat.check('V2'):
+            v2_mount_points, v2_repo_mounts = extract_mount_points_v2(proc, repo_url)
+            mount_points.update(v2_mount_points)
+            repo_mounts.extend(v2_repo_mounts)
+        else:
+            v1_mount_points, v1_repo_mounts = extract_mount_points_v1(proc, repo_url)
+            mount_points.update(v1_mount_points)
+            repo_mounts.extend(v1_repo_mounts)
 
     return mount_points, repo_mounts
 
@@ -407,21 +514,6 @@ def is_system_tray_available():
         is_available = tray.isSystemTrayAvailable()
 
     return is_available
-
-
-def validate_passwords(first_pass, second_pass):
-    '''Validates the password for borg, do not use on single fields'''
-    pass_equal = first_pass == second_pass
-    pass_long = len(first_pass) > 8
-
-    if not pass_long and not pass_equal:
-        return trans_late('utils', "Passwords must be identical and greater than 8 characters long.")
-    if not pass_equal:
-        return trans_late('utils', "Passwords must be identical.")
-    if not pass_long:
-        return trans_late('utils', "Passwords must be greater than 8 characters long.")
-
-    return ""
 
 
 def search(key, iterable: Iterable, func: Callable = None) -> Tuple[int, Any]:

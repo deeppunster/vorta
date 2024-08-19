@@ -1,6 +1,8 @@
 import os
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+
 from vorta.store.models import BackupProfileModel
 from vorta.utils import get_asset
 
@@ -13,9 +15,10 @@ class TrayMenu(QSystemTrayIcon):
         menu = QMenu()
 
         # Workaround to get `activated` signal on Unity: https://stackoverflow.com/a/43683895/3983708
-        menu.aboutToShow.connect(self.on_user_click)
+        menu.aboutToShow.connect(self.build_menu)
 
         self.setContextMenu(menu)
+        self.build_menu()
 
         self.activated.connect(self.on_activation)
         self.app.paletteChanged.connect(lambda p: self.set_tray_icon())
@@ -30,12 +33,12 @@ class TrayMenu(QSystemTrayIcon):
         If XDG_CURRENT_DESKTOP isn't set, always open the tray menu (macOS)
         """
         if reason in [
-            QSystemTrayIcon.Trigger,
-            QSystemTrayIcon.DoubleClick,
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
         ] and os.environ.get('XDG_CURRENT_DESKTOP'):
             self.app.toggle_main_window_visibility()
 
-    def on_user_click(self):
+    def build_menu(self):
         """Build system tray menu based on current state."""
 
         menu = self.contextMenu()
@@ -59,7 +62,7 @@ class TrayMenu(QSystemTrayIcon):
             profiles = BackupProfileModel.select()
             if profiles.count() > 1:
                 profile_menu = menu.addMenu(self.tr('Backup Now'))
-                for profile in profiles:
+                for profile in sorted(profiles, key=lambda p: (p.name.casefold(), p.name)):
                     new_item = profile_menu.addAction(profile.name)
                     new_item.triggered.connect(lambda state, i=profile.id: self.app.create_backup_action(i))
             else:
